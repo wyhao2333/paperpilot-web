@@ -6,7 +6,7 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             python: '3.12'
           - os: windows-latest
             python: '3.11'
