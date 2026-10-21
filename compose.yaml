@@ -1,0 +1,37 @@
+services:
+  paperpilot:
+    build: .
+    restart: unless-stopped
+    init: true
+    ports:
+      - "${APP_BIND:-127.0.0.1}:${APP_PORT:-8765}:8765"
+    environment:
+      APP_HOST: 0.0.0.0
+      APP_PORT: 8765
+      APP_DATA_DIR: /app/data
+      APP_ORIGIN: ${APP_ORIGIN:-http://localhost:8765}
+      APP_SECURE_COOKIES: ${APP_SECURE_COOKIES:-false}
+      LOCAL_ADMIN_AUTOLOGIN: "false"
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-50}
+      MAX_PDF_PAGES: ${MAX_PDF_PAGES:-200}
+      MAX_USER_STORAGE_MB: ${MAX_USER_STORAGE_MB:-1024}
+      DAILY_TEXT_LIMIT: ${DAILY_TEXT_LIMIT:-0}
+      ALLOW_LOCAL_API: ${ALLOW_LOCAL_API:-false}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - paperpilot-data:/app/data
+    tmpfs:
+      - /tmp:size=256m
+    read_only: true
+    mem_limit: 2g
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  paperpilot-data:
