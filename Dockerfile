@@ -1,16 +1,17 @@
-FROM node:24-bookworm-slim AS frontend
+FROM node:24.22.1-bookworm-slim AS frontend
 WORKDIR /build
 COPY frontend/package*.json ./
 RUN npm ci
 COPY frontend/ ./
 RUN npm run build
 
-FROM python:3.12-slim-bookworm
+FROM python:3.12.15-slim-bookworm
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 APP_HOST=0.0.0.0 APP_PORT=8765 APP_DATA_DIR=/app/data
 WORKDIR /app
 COPY requirements.txt ./
 RUN apt-get update && apt-get install -y --no-install-recommends libstdc++6 \
     && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir --upgrade pip==26.2.2 setuptools==84.2.1 \
     && pip install --no-cache-dir -r requirements.txt \
     && groupadd --gid 10001 paperpilot \
     && useradd --uid 10001 --gid 10001 --create-home paperpilot \

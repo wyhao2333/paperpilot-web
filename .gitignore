@@ -33,6 +33,12 @@ backups/
 .aws/
 .DS_Store
 Thumbs.db
+# Local instructions, deployment notes and private verification records.
+AGENT.md
+AGENTS.md
+docs/
+*PROMPT*.md
+*prompt*.md
 *.pdf
 !examples/paperpilot-sample.pdf
 !.gitkeep

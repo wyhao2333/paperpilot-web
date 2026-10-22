@@ -8,8 +8,6 @@ import re
 import secrets
 import shutil
 import sqlite3
-import time
-from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,16 +15,18 @@ from typing import Literal
 from urllib.parse import quote, urlsplit
 
 import httpx
-from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from starlette.datastructures import UploadFile as FormUploadFile
 
 from . import __version__
 from .config import Config, ROOT
 from .db import Database, dumps, now, uid
 from .jobs import Jobs, context_for
+from .http_security import LoginProtection, RequestBoundaryMiddleware
 from .providers import Providers, ProviderError, ENGINES, ensure_configured, translation_signature, validate_base_url
 from .security import Vault, hash_password, token_hash, verify_password
 
@@ -97,7 +97,7 @@ def create_app(config=None, *, transport=None):
     config = config or Config.from_env()
     db = Database(config.data_dir)
     vault = Vault(config.data_dir)
-    login_attempts = defaultdict(deque)
+    login_protection = LoginProtection()
 
     @asynccontextmanager
     async def lifespan(app):
@@ -112,45 +112,14 @@ def create_app(config=None, *, transport=None):
             yield
             await jobs.stop()
 
-    app = FastAPI(title="PaperPilot Web", version=__version__, lifespan=lifespan, docs_url=None, redoc_url=None)
+    app = FastAPI(title="PaperPilot Web", version=__version__, lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.db, app.state.vault, app.state.config = db, vault, config
+    app.add_middleware(RequestBoundaryMiddleware, config=config, login_protection=login_protection)
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(_request, exc):
         # Never echo credential values from a validation error.
         return JSONResponse({"detail": "输入格式有误，请检查填写内容。", "fields": [".".join(map(str, x["loc"])) for x in exc.errors()]}, status_code=422)
-
-    @app.middleware("http")
-    async def boundaries(request, call_next):
-        if request.url.path.startswith("/api/"):
-            length = request.headers.get("content-length", "0")
-            try:
-                size = int(length)
-            except ValueError:
-                return JSONResponse({"detail": "Content-Length 无效。"}, status_code=400)
-            is_upload = request.url.path == "/api/documents" and request.method == "POST"
-            maximum = (config.max_upload_mb * 1024 * 1024 + 1024 * 1024) if is_upload else 512 * 1024
-            if size > maximum:
-                return JSONResponse({"detail": f"上传上限为 {config.max_upload_mb}MB。" if is_upload else "请求内容过大。"}, status_code=413)
-            if is_upload and not request.headers.get("content-length"):
-                return JSONResponse({"detail": "上传需要 Content-Length，请使用网页上传。"}, status_code=411)
-            if request.method not in {"GET", "HEAD", "OPTIONS"}:
-                origin = request.headers.get("origin")
-                allowed = {config.origin}
-                parsed = urlsplit(config.origin)
-                if parsed.hostname in {"localhost", "127.0.0.1"}:
-                    port = parsed.port or 80
-                    allowed.update({f"http://localhost:{port}", f"http://127.0.0.1:{port}"})
-                if (origin and origin not in allowed) or request.headers.get("x-paperpilot") != "1":
-                    return JSONResponse({"detail": "请求来源未获允许，请从本服务页面操作。"}, status_code=403)
-        response = await call_next(request)
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["Referrer-Policy"] = "same-origin"
-        response.headers["X-Frame-Options"] = "DENY"
-        response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; connect-src 'self'; worker-src 'self' blob:; font-src 'self' data:; frame-ancestors 'none'; object-src 'none'; base-uri 'self'"
-        if request.url.path.startswith("/api/") or request.url.path in {"/", "/index.html"}:
-            response.headers["Cache-Control"] = "no-store"
-        return response
 
     def user(request: Request):
         token = request.cookies.get(COOKIE, "")
@@ -219,21 +188,15 @@ def create_app(config=None, *, transport=None):
     @app.post("/api/login")
     def login(body: Credentials, request: Request, response: Response):
         key = (request.client.host, body.username.lower())
-        attempts = login_attempts[key]
-        moment = time.monotonic()
-        while attempts and attempts[0] < moment - 900:
-            attempts.popleft()
-        if len(attempts) >= 10:
-            raise HTTPException(429, "登录尝试过多，请 15 分钟后重试。")
-        attempts.append(moment)
+        retry = login_protection.accounts.take(key)
+        if retry:
+            raise HTTPException(429, "登录尝试过多，请稍后重试。", headers={"Retry-After": str(retry)})
         account = db.one("SELECT * FROM users WHERE username=?", (body.username.lower(),))
         dummy = "scrypt$" + "00" * 16 + "$" + "00" * 64
         valid = verify_password(body.password, account["password_hash"] if account else dummy)
         if not account or not valid:
             raise HTTPException(401, "用户名或密码错误。")
-        attempts.clear()
-        if len(login_attempts) > 3000:
-            login_attempts.clear()
+        login_protection.accounts.forget(key)
         return make_session(response, account)
 
     @app.post("/api/logout")
@@ -372,8 +335,13 @@ def create_app(config=None, *, transport=None):
             await handle.close()
 
     @app.post("/api/documents", status_code=202)
-    async def upload(file: UploadFile = File(...), current=Depends(user)):
-        return await import_file(file, file.filename or "paper.pdf", current)
+    async def upload(request: Request, current=Depends(user)):
+        # Explicit parsing keeps authentication/CSRF ahead of all multipart work.
+        async with request.form(max_files=1, max_fields=0, max_part_size=64 * 1024) as form:
+            file = form.get("file")
+            if not isinstance(file, FormUploadFile) or len(form) != 1:
+                raise HTTPException(400, "请上传一个 PDF 文件。")
+            return await import_file(file, file.filename or "paper.pdf", current)
 
     @app.post("/api/sample", status_code=202)
     async def sample(current=Depends(user)):

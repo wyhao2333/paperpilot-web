@@ -28,3 +28,13 @@ tests
 .cloudflared
 .ssh
 .aws
+AGENT.md
+AGENTS.md
+docs
+**/*PROMPT*.md
+**/*prompt*.md
+**/.env
+**/.env.*
+**/.npmrc
+**/*.pdf
+!examples/paperpilot-sample.pdf

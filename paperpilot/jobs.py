@@ -1,11 +1,9 @@
 import asyncio
 import json
 import logging
-import os
-import sys
 from datetime import datetime, timezone
 
-from .config import ROOT
+from .parse_runner import parse_remote, parse_subprocess
 from .ai_config import translation_concurrency
 from .chat import CHAT_PROMPT, chat_context, chat_question, completed_history
 from .db import dumps, now, uid
@@ -90,30 +88,8 @@ class Jobs:
     async def parse(self, job):
         async with self.parse_semaphore:
             self.db.execute("UPDATE documents SET status='parsing',updated=? WHERE id=?", (now(), job["document_id"]))
-            process = await asyncio.create_subprocess_exec(
-                sys.executable, "-m", "paperpilot.pdf_worker", str(self.db.pdf_path(job["document_id"])),
-                "--max-pages", str(self.config.max_pages),
-                "--assets-dir", str(self.db.media_path(job['document_id'])), cwd=str(ROOT),
-                env={**os.environ, "PYTHONIOENCODING": "utf-8"},
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            )
-            try:
-                output, _stderr = await asyncio.wait_for(process.communicate(), timeout=120)
-            except BaseException as exc:
-                try:
-                    process.kill()
-                except ProcessLookupError:
-                    pass
-                await process.wait()
-                if isinstance(exc, asyncio.TimeoutError):
-                    raise ValueError("PDF 解析超过 120 秒上限，请拆分文件或检查复杂版面。") from exc
-                raise
-            try:
-                parsed = json.loads(output.decode("utf-8"))
-            except (UnicodeError, ValueError) as exc:
-                raise ValueError("PDF 解析进程未返回有效结果，请检查文件是否损坏。") from exc
-            if process.returncode != 0 or parsed.get("error"):
-                raise ValueError(parsed.get("error", "PDF 解析失败。"))
+            args = (self.db.pdf_path(job["document_id"]), self.config.max_pages, self.db.media_path(job["document_id"]))
+            parsed = await parse_remote(*args, self.config.parser_url) if self.config.parser_url else await parse_subprocess(*args)
             with self.db.connect() as con:
                 old_titles = [r['text'] for r in con.execute("SELECT text FROM (SELECT kind,text FROM paragraphs WHERE document_id=? ORDER BY ordinal LIMIT 5) WHERE kind='title'", (job['document_id'],))]
                 self.db.replace_paragraphs(con, job['document_id'], parsed['paragraphs'])

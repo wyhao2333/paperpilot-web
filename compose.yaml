@@ -1,6 +1,7 @@
 services:
   paperpilot:
     build: .
+    image: paperpilot-web:local
     restart: unless-stopped
     init: true
     ports:
@@ -10,13 +11,14 @@ services:
       APP_PORT: 8765
       APP_DATA_DIR: /app/data
       APP_ORIGIN: ${APP_ORIGIN:-http://localhost:8765}
-      APP_SECURE_COOKIES: ${APP_SECURE_COOKIES:-false}
+      APP_SECURE_COOKIES: ${APP_SECURE_COOKIES:-auto}
       LOCAL_ADMIN_AUTOLOGIN: "false"
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-50}
       MAX_PDF_PAGES: ${MAX_PDF_PAGES:-200}
       MAX_USER_STORAGE_MB: ${MAX_USER_STORAGE_MB:-1024}
       DAILY_TEXT_LIMIT: ${DAILY_TEXT_LIMIT:-0}
       ALLOW_LOCAL_API: ${ALLOW_LOCAL_API:-false}
+      PDF_PARSER_URL: http://parser:8766
       HTTPS_PROXY: ${HTTPS_PROXY:-}
       HTTP_PROXY: ${HTTP_PROXY:-}
       NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1}
@@ -28,10 +30,50 @@ services:
       - /tmp:size=256m
     read_only: true
     mem_limit: 2g
+    pids_limit: 64
     security_opt:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    depends_on:
+      parser:
+        condition: service_healthy
+    networks:
+      - default
+      - parsing
+
+  parser:
+    image: paperpilot-web:local
+    pull_policy: never
+    command: ["python", "-m", "paperpilot.parse_service"]
+    user: "10002:10002"
+    restart: unless-stopped
+    init: true
+    environment:
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-50}
+      MAX_PDF_PAGES: ${MAX_PDF_PAGES:-200}
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    mem_limit: 1536m
+    cpus: 1.5
+    pids_limit: 32
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8766/health',timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+    networks:
+      - parsing
 
 volumes:
   paperpilot-data:
+
+networks:
+  default: {}
+  parsing:
+    internal: true

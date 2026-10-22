@@ -1,4 +1,4 @@
-"""One-command Windows / Ubuntu setup and launch. Requires Python 3.11+ and Node 22.13+/24+."""
+"""One-command Windows / Ubuntu setup and launch. Use patched Python and Node."""
 import argparse
 import hashlib
 import json
@@ -38,9 +38,10 @@ def main():
         raise SystemExit("Install Node.js 24 LTS (includes npm), then run this command again.")
     node = shutil.which("node")
     version = subprocess.check_output([node, "--version"], text=True).strip().lstrip("v").split(".")
-    major, minor = map(int, version[:2])
-    if major < 22 or (major == 22 and minor < 13):
-        raise SystemExit("PDF.js requires Node.js 22.13+ or 24+. Recommended: Node.js 24 LTS.")
+    installed = tuple(map(int, version[:3]))
+    patched = {22: (22, 23, 4), 24: (24, 22, 1), 26: (26, 12, 1)}
+    if installed[0] not in patched or installed < patched[installed[0]]:
+        raise SystemExit("Install security-patched Node.js: 24.22.1+ recommended (or 22.23.4+/26.12.1+).")
     python = ROOT / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     if not python.exists():
         print("Creating an isolated Python environment...", flush=True)
